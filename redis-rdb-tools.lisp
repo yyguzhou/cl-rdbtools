@@ -57,6 +57,7 @@
 
 (defun parse-redis-obj (in)
   (multiple-value-bind (type len flag) (parse-length in)
+    (format t "type ~a len ~a flag ~a~%" type len flag)
     (case type
       ((#x00 #x40 #x80) (values (parse-string in len) 'rdb-string))
       (#xC0 (case flag
@@ -71,6 +72,37 @@
         ('rdb-string (format t "string: "))
         ('rdb-compressed-string (format t "compressed string: ")))
       (format t "~a~%" result))))
+
+(defun parse-ziplist-entry (in)
+  (let* ((next (read-byte in))
+         (prev-len (cond ((> next 253) (read-dword-le in))
+                         (t next)))
+         (flag (read-byte in))
+         (len (case (logand #xC0 flag)
+                (0 (logand #x3F flag))
+                (#x40 (logior (ash (logand #x3F flag) 8) (read-byte in)))
+                (#x80 (read-dword in))
+                (t nil))))
+    (if len
+        (read-string in len)
+        (case (logand flag #x30)
+          (0 (read-word-le in))
+          (1 (read-dword-le in))
+          (2 (read-qword-le in))
+          (t (case (logand flag #x0F)
+               (0 (logior (read-byte in) (ash (read-word-le in) 8)))
+               (#x0E (read-byte in))
+               (t (logand flag #x0F))))))))
+
+(defun parse-ziplist (in)
+  (parse-length in)
+  (let* ((zlbytes (read-dword-le in))
+         (zltail (read-dword-le in))
+         (zllen (read-word-le in)))
+    (format t "zlbytes ~a zltail ~a zllen ~a~%" zlbytes zltail zllen)
+    (dotimes (i zllen)
+      (format t "~a~%" (parse-ziplist-entry in)))
+    (format t "zlend ~a~%" (read-byte in))))
 
 (defun parse-hash (in)
   (multiple-value-bind (type len) (parse-length in)
@@ -91,7 +123,7 @@
      do
        (format t "Key: ~a~%" (parse-redis-obj in))
        (case next
-         (13 (format t "Ziplist: ~a~%" (parse-redis-obj in)))
+         (13 (parse-ziplist in))
          (#xFD (format t "expiry time in seconds~%") next)
          (#xFC (format t "expiry time in ms~%") next)
          (0 (format t "String: ~a~%" (parse-redis-obj in)))
