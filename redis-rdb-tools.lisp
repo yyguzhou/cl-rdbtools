@@ -57,7 +57,7 @@
 
 (defun parse-redis-obj (in)
   (multiple-value-bind (type len flag) (parse-length in)
-    (format t "type ~a len ~a flag ~a~%" type len flag)
+;    (format t "type ~a len ~a flag ~a~%" type len flag)
     (case type
       ((#x00 #x40 #x80) (values (parse-string in len) 'rdb-string))
       (#xC0 (case flag
@@ -87,8 +87,8 @@
         (read-string in len)
         (case (logand flag #x30)
           (0 (read-word-le in))
-          (1 (read-dword-le in))
-          (2 (read-qword-le in))
+          (#x10 (read-dword-le in))
+          (#x20 (read-qword-le in))
           (t (case (logand flag #x0F)
                (0 (logior (read-byte in) (ash (read-word-le in) 8)))
                (#x0E (read-byte in))
@@ -99,7 +99,7 @@
   (let* ((zlbytes (read-dword-le in))
          (zltail (read-dword-le in))
          (zllen (read-word-le in)))
-    (format t "zlbytes ~a zltail ~a zllen ~a~%" zlbytes zltail zllen)
+;    (format t "zlbytes ~a zltail ~a zllen ~a~%" zlbytes zltail zllen)
     (dotimes (i zllen)
       (format t "~a~%" (parse-ziplist-entry in)))
     (format t "zlend ~a~%" (read-byte in))))
@@ -119,16 +119,16 @@
 ;  (let ((next (read-byte in)))
 ;    (format t "next ~a~%" next)))
   (loop for next = (read-byte in) then (read-byte in)
-     until (not (find next '(0 1 2 3 4 13)))
+     until (not (find next '(0 1 2 3 4 9 10 11 12 13)))
      do
-       (format t "Key: ~a~%" (parse-redis-obj in))
+       (format t "Key: ~a type:~a~%" (parse-redis-obj in) next)
        (case next
-         (13 (parse-ziplist in))
+         ((10 13) (parse-ziplist in))
          (#xFD (format t "expiry time in seconds~%") next)
          (#xFC (format t "expiry time in ms~%") next)
          (0 (format t "String: ~a~%" (parse-redis-obj in)))
-         ((1 2 3) (format t "List or Set: ~a~%" (parse-list-set in)))
-         (4 (format t "Hash: ~a~%" (parse-hash in))))))
+         ((1 2 3) (format t "List or Set~%") (parse-list-set in))
+         (4 (format t "Hash~%") (parse-hash in)))))
 
 (defun parse-rdb (in)
   (let* ((magic-str (read-string in 5))
