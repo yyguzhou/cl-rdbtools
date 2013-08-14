@@ -1,47 +1,13 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (use-package :sb-ext))
 
-(defclass hook-func () ())
-
-(defgeneric parse-magic-hook (hook-func result))
-(defgeneric parse-rdb-version-hook (hook-func result))
-(defgeneric parse-string-hook (hook-func result))
-(defgeneric parse-integer-hook (hook-func result))
-(defgeneric parse-ziplist-entry-hook (hook-func result))
-(defgeneric parse-key-hook (hook-func result))
-(defgeneric parse-db-number-hook (hook-func result))
-(defgeneric parse-simple-value-hook (hook-func result))
-
-(defclass default-hook (hook-func) ())
-
-(defmethod parse-magic-hook ((hook default-hook) result)
-  (format t "[MAGIC]~a~a~a~%" (code-char 9) (code-char 9) result))
-
-(defmethod parse-rdb-version-hook ((hook default-hook) result)
-  (format t "[VERSION]~a~a~%" (code-char 9) result))
-
-(defmethod parse-string-hook ((hook default-hook) result)
-  (format t "~a~a~%" (code-char 9) result))
-
-(defmethod parse-integer-hook ((hook default-hook) result)
-  (format t "~a~a~%" (code-char 9) result))
-
-(defmethod parse-ziplist-entry-hook ((hook default-hook) result)
-  (format t "~a~a~%" (code-char 9) result))
-
-(defmethod parse-key-hook ((hook default-hook) result)
-  (format t "~%~a:~%" result))
-
-(defmethod parse-db-number-hook ((hook default-hook) result)
-  (format t "[DB]~a~a~a~%" (code-char 9) (code-char 9) result))
-
-(defvar *hook* (make-instance 'default-hook))
-
-(let* ((dbs (make-list 16))
+(let* ((dbs nil)
        (cur-db nil))
-  (dotimes (x (list-length dbs))
-    (setf (nth x dbs) (make-hash-table :test #'equal)))
-  (setf cur-db (nth 0 dbs))
+  (defun set-db-list (lst)
+    (setf dbs lst)
+    (dotimes (x (list-length dbs))
+      (setf (nth x dbs) (make-hash-table :test #'equal)))
+    (setf cur-db (nth 0 dbs)))
   (defun select-db (n)
     (setf cur-db (nth n dbs)))
   (defun db-set (k v)
@@ -105,7 +71,6 @@
 
 (defun parse-redis-obj (in)
   (multiple-value-bind (type len flag) (parse-length in)
-;    (format t "type ~a len ~a flag ~a~%" type len flag)
     (case type
       ((#x00 #x40 #x80) (values (parse-string in len) 'rdb-string))
       (#xC0 (case flag
@@ -113,12 +78,10 @@
               (t (values (parse-compressed-string in) 'rdb-compressed-string)))))))
 
 (defun parse-sequence (in n)
-  (dotimes (x n)
-    (multiple-value-bind (result type) (parse-redis-obj in)
-      (case type
-        (rdb-integer (parse-integer-hook *hook* result))
-        (rdb-string (parse-string-hook *hook* result))
-        (rdb-compressed-string (parse-string-hook *hook* result))))))
+  (let ((lst nil))
+    (dotimes (x n)
+      (setf lst (append lst (list (parse-redis-obj in)))))
+    lst))
 
 (defun parse-ziplist-entry (in)
   (let* ((next (read-byte in))
@@ -145,11 +108,12 @@
   (parse-length in)
   (let* ((zlbytes (read-dword-le in))
          (zltail (read-dword-le in))
-         (zllen (read-word-le in)))
-;    (format t "zlbytes ~a zltail ~a zllen ~a~%" zlbytes zltail zllen)
+         (zllen (read-word-le in))
+         (lst nil))
     (dotimes (i zllen)
-      (parse-ziplist-entry-hook *hook* (parse-ziplist-entry in)))
-    (read-byte in)))
+      (setf lst (append lst (list (parse-ziplist-entry in)))))
+    (read-byte in)
+    lst))
 
 (defun parse-hash (in)
   (multiple-value-bind (type len) (parse-length in)
@@ -162,40 +126,30 @@
     (parse-sequence in len)))
 
 (defun parse-simple (in)
-  (multiple-value-bind (val type) (parse-redis-obj in)
-    (case type
-      (rdb-integer (parse-integer-hook *hook* val))
-      (rdb-string (parse-string-hook *hook* val))
-      (rdb-compressed-string (parse-string-hook *hook* val)))))
+  (parse-redis-obj in))
 
 (defun parse-db (in)
-  (parse-db-number-hook *hook* (read-byte in))
-  (loop for next = (read-byte in) then (read-byte in)
+  (select-db (read-byte in))
+  (loop
+     with key
+     for next = (read-byte in) then (read-byte in)
      until (not (find next '(0 1 2 3 4 9 10 11 12 13)))
      do
-       (parse-key-hook *hook* (parse-redis-obj in))
+       (setf key (parse-redis-obj in))
        (case next
-         ((10 13) (parse-ziplist in))
+         (10 (db-set key (parse-ziplist in)))
+         (13 (db-set key (parse-ziplist in)))
          (#xFD (format t "expiry time in seconds~%") next)
          (#xFC (format t "expiry time in ms~%") next)
-         (0 (parse-simple in))
-         ((1 2 3) (parse-list-set in))
-         (4 (parse-hash in)))))
+         (0 (db-set key (parse-simple in)))
+         ((1 2 3) (db-set key (parse-list-set in)))
+         (4 (db-set key (parse-hash in))))))
 
 (defun parse-rdb (in)
-  (parse-magic-hook *hook* (read-string in 5))
-  (parse-rdb-version-hook *hook* (read-string in 4))
-  (loop for next = (read-byte in) then (parse-db in)
-      until (not (eql #xFE next))))
-
-(defun main ()
-  (if (not (eql 2 (length *posix-argv*)))
-      (progn (format t "Useage: ~a redis-rdb-file~%" (first *posix-argv*))
-             (exit))
-      (with-open-file (s (nth 1 *posix-argv*)
-                         :direction :input
-                         :element-type '(unsigned-byte 8)
-                         :if-does-not-exist :error)
-        (parse-rdb s))))
-
-(main)
+  (read-string in 5)
+  (read-string in 4)
+  (let ((dbs (make-list 16)))
+    (set-db-list dbs)
+    (loop for next = (read-byte in) then (parse-db in)
+       until (not (eql #xFE next)))
+    dbs))
