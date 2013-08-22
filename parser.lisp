@@ -1,5 +1,29 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (use-package :sb-ext))
+  (use-package :sb-ext)
+  (use-package :sb-alien))
+
+(load-shared-object "./lzf_d.so")
+
+(define-alien-routine lzf_decompress
+    (unsigned 32)
+  (in_data (* unsigned-char))
+  (in_len unsigned-int)
+  (out_data (* unsigned-char))
+  (out_len unsigned-int))
+
+(defun lzf-decompress (str clen len)
+  (let* ((out-str (make-array (1+ len)))
+         (in-data (make-alien unsigned-char clen))
+         (out-data (make-alien unsigned-char (1+ len))))
+    (dotimes (i clen)
+      (setf (deref in-data i) (char-code (char str i))))
+    (lzf_decompress in-data clen out-data len)
+    (dotimes (i len)
+      (setf (aref out-str i) (deref out-data i)))
+    (setf (aref out-str len) 0)
+    (free-alien in-data)
+    (free-alien out-data)
+    (map 'string #'code-char out-str)))
 
 (let* ((dbs nil)
        (cur-db nil))
@@ -51,8 +75,8 @@
   (multiple-value-bind (ctype clen) (parse-length in)
     (declare (ignore ctype))
     (multiple-value-bind (type len) (parse-length in)
-      (declare (ignore type len))
-      (parse-string in clen))))
+      (declare (ignore type))
+      (lzf-decompress (parse-string in clen) clen len))))
 
 (defun parse-length (in)
   (let* ((next (read-byte in))
